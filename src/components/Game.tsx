@@ -1,12 +1,7 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
-import type {
-  GameState,
-  GameEvent,
-  GenerateEventResponse,
-  GenerateCeremonyResponse,
-} from "../types";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import type { GameState, GameEvent } from "../types";
 import {
   createInitialState,
   applyAffinityChanges,
@@ -19,10 +14,18 @@ import {
   getFemaleCharacters,
 } from "../lib/gameEngine";
 import { getAffinityKey } from "../data/characters";
+import {
+  createAnthropicClient,
+  generateEvent,
+  generateCeremony,
+} from "../lib/claudeClient";
+import ApiKeyModal from "./ApiKeyModal";
 import CharacterCard from "./CharacterCard";
 import EventDisplay from "./EventDisplay";
 import EventLog from "./EventLog";
 import RelationshipMatrix from "./RelationshipMatrix";
+
+const LOCAL_STORAGE_KEY = "ai_island_api_key";
 
 // ─── Intro Screen ─────────────────────────────────────────────────────────────
 function IntroScreen({ onStart }: { onStart: () => void }) {
@@ -267,7 +270,32 @@ function ResultsScreen({
 export default function Game() {
   const [state, setState] = useState<GameState>(createInitialState);
   const [viewingEvent, setViewingEvent] = useState<GameEvent | null>(null);
+  const [apiKey, setApiKey] = useState<string | null>(null);
+  const [apiError, setApiError] = useState<string>("");
   const autoPlayTimer = useRef<NodeJS.Timeout | null>(null);
+
+  // Load saved API key from localStorage on mount
+  useEffect(() => {
+    const saved = localStorage.getItem(LOCAL_STORAGE_KEY);
+    if (saved) setApiKey(saved);
+  }, []);
+
+  const handleApiKeySubmit = useCallback((key: string, remember: boolean) => {
+    setApiKey(key);
+    if (remember) localStorage.setItem(LOCAL_STORAGE_KEY, key);
+    else localStorage.removeItem(LOCAL_STORAGE_KEY);
+  }, []);
+
+  const handleClearApiKey = useCallback(() => {
+    setApiKey(null);
+    localStorage.removeItem(LOCAL_STORAGE_KEY);
+  }, []);
+
+  // Create Anthropic client from API key
+  const claudeClient = useMemo(
+    () => (apiKey ? createAnthropicClient(apiKey) : null),
+    [apiKey]
+  );
 
   const currentDisplayEvent = viewingEvent ?? state.currentEvent;
 
@@ -275,28 +303,21 @@ export default function Game() {
   const generateNextEvent = useCallback(async () => {
     if (state.isLoading) return;
     if (state.phase === "ceremony" || state.phase === "results") return;
+    if (!claudeClient) return;
 
     setState((s) => ({ ...s, isLoading: true }));
     setViewingEvent(null);
+    setApiError("");
 
     try {
-      const res = await fetch("/api/event", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          day: state.day,
-          timeOfDay: state.timeOfDay,
-          characters: state.characters,
-          affinities: state.affinities,
-          recentEvents: state.events.slice(-5),
-          paradisePairs: state.paradisePairs,
-        }),
+      const data = await generateEvent(claudeClient, {
+        day: state.day,
+        timeOfDay: state.timeOfDay,
+        characters: state.characters,
+        affinities: state.affinities,
+        recentEvents: state.events.slice(-5),
+        paradisePairs: state.paradisePairs,
       });
-
-      if (!res.ok) throw new Error("API error");
-
-      const data: { event: GenerateEventResponse; paradiseEvent: GenerateEventResponse | null } =
-        await res.json();
 
       const newEventId = `evt_${Date.now()}`;
       const newEvent: GameEvent = {
@@ -374,29 +395,25 @@ export default function Game() {
       });
     } catch (err) {
       console.error("Failed to generate event:", err);
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      setApiError(`イベント生成に失敗しました: ${msg}`);
       setState((s) => ({ ...s, isLoading: false }));
     }
-  }, [state]);
+  }, [state, claudeClient]);
 
   // ── Generate ceremony ────────────────────────────────────────────────────
-  const generateCeremony = useCallback(async () => {
+  const generateCeremonyHandler = useCallback(async () => {
+    if (!claudeClient) return;
     setState((s) => ({ ...s, isLoading: true }));
+    setApiError("");
 
     try {
-      const res = await fetch("/api/ceremony", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          characters: state.characters,
-          affinities: state.affinities,
-          paradisePairs: state.paradisePairs,
-          events: state.events,
-        }),
+      const data = await generateCeremony(claudeClient, {
+        characters: state.characters,
+        affinities: state.affinities,
+        paradisePairs: state.paradisePairs,
+        events: state.events,
       });
-
-      if (!res.ok) throw new Error("Ceremony API error");
-
-      const data: GenerateCeremonyResponse = await res.json();
 
       const ceremonyEvent: GameEvent = {
         id: `ceremony_${Date.now()}`,
@@ -425,9 +442,11 @@ export default function Game() {
       }));
     } catch (err) {
       console.error("Failed to generate ceremony:", err);
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      setApiError(`セレモニー生成に失敗しました: ${msg}`);
       setState((s) => ({ ...s, isLoading: false }));
     }
-  }, [state]);
+  }, [state, claudeClient]);
 
   // ── Auto-play ─────────────────────────────────────────────────────────────
   const toggleAutoPlay = useCallback(() => {
@@ -441,7 +460,7 @@ export default function Game() {
     }
 
     if (state.phase === "ceremony") {
-      autoPlayTimer.current = setTimeout(generateCeremony, 2000);
+      autoPlayTimer.current = setTimeout(generateCeremonyHandler, 2000);
     } else if (state.phase === "playing" && !state.isLoading) {
       autoPlayTimer.current = setTimeout(generateNextEvent, state.autoPlaySpeed);
     }
@@ -449,7 +468,7 @@ export default function Game() {
     return () => {
       if (autoPlayTimer.current) clearTimeout(autoPlayTimer.current);
     };
-  }, [state.autoPlay, state.phase, state.isLoading, state.autoPlaySpeed, generateNextEvent, generateCeremony]);
+  }, [state.autoPlay, state.phase, state.isLoading, state.autoPlaySpeed, generateNextEvent, generateCeremonyHandler]);
 
   // ── Start game ──────────────────────────────────────────────────────────
   const startGame = useCallback(() => {
@@ -462,6 +481,10 @@ export default function Game() {
   }, []);
 
   // ── Render phases ─────────────────────────────────────────────────────────
+  if (!apiKey) {
+    return <ApiKeyModal onSubmit={handleApiKeySubmit} />;
+  }
+
   if (state.phase === "intro") {
     return <IntroScreen onStart={startGame} />;
   }
@@ -540,6 +563,15 @@ export default function Game() {
               className="text-xs text-gray-500 hover:text-gray-300 transition-colors px-2"
             >
               ↺ リスタート
+            </button>
+
+            {/* Change API Key */}
+            <button
+              onClick={handleClearApiKey}
+              className="text-xs text-gray-600 hover:text-gray-400 transition-colors px-2"
+              title="APIキーを変更"
+            >
+              🔑
             </button>
           </div>
         </div>
@@ -664,7 +696,7 @@ export default function Game() {
 
           {state.phase === "ceremony" && (
             <button
-              onClick={generateCeremony}
+              onClick={generateCeremonyHandler}
               disabled={state.isLoading || state.autoPlay}
               className="px-8 py-3 bg-gradient-to-r from-yellow-600 to-amber-600 hover:from-yellow-500 hover:to-amber-500 text-white font-bold rounded-full transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed hover:scale-105 shadow-lg shadow-yellow-600/20 animate-pulse"
             >
@@ -677,6 +709,13 @@ export default function Game() {
                 "✨ カップリングセレモニー"
               )}
             </button>
+          )}
+
+          {/* Error display */}
+          {apiError && (
+            <div className="bg-red-900/40 border border-red-500/30 rounded-lg px-4 py-2">
+              <p className="text-red-400 text-xs">{apiError}</p>
+            </div>
           )}
 
           {/* Event count indicator */}
