@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import type { GameState, GameEvent } from "../types";
 import {
   createInitialState,
@@ -14,18 +14,12 @@ import {
   getFemaleCharacters,
 } from "../lib/gameEngine";
 import { getAffinityKey } from "../data/characters";
-import {
-  createAnthropicClient,
-  generateEvent,
-  generateCeremony,
-} from "../lib/claudeClient";
-import ApiKeyModal from "./ApiKeyModal";
+import { generateEvent, generateCeremony } from "../lib/gameAI";
 import CharacterCard from "./CharacterCard";
 import EventDisplay from "./EventDisplay";
 import EventLog from "./EventLog";
 import RelationshipMatrix from "./RelationshipMatrix";
 
-const LOCAL_STORAGE_KEY = "ai_island_api_key";
 
 // ─── Intro Screen ─────────────────────────────────────────────────────────────
 function IntroScreen({ onStart }: { onStart: () => void }) {
@@ -270,32 +264,8 @@ function ResultsScreen({
 export default function Game() {
   const [state, setState] = useState<GameState>(createInitialState);
   const [viewingEvent, setViewingEvent] = useState<GameEvent | null>(null);
-  const [apiKey, setApiKey] = useState<string | null>(null);
   const [apiError, setApiError] = useState<string>("");
   const autoPlayTimer = useRef<NodeJS.Timeout | null>(null);
-
-  // Load saved API key from localStorage on mount
-  useEffect(() => {
-    const saved = localStorage.getItem(LOCAL_STORAGE_KEY);
-    if (saved) setApiKey(saved);
-  }, []);
-
-  const handleApiKeySubmit = useCallback((key: string, remember: boolean) => {
-    setApiKey(key);
-    if (remember) localStorage.setItem(LOCAL_STORAGE_KEY, key);
-    else localStorage.removeItem(LOCAL_STORAGE_KEY);
-  }, []);
-
-  const handleClearApiKey = useCallback(() => {
-    setApiKey(null);
-    localStorage.removeItem(LOCAL_STORAGE_KEY);
-  }, []);
-
-  // Create Anthropic client from API key
-  const claudeClient = useMemo(
-    () => (apiKey ? createAnthropicClient(apiKey) : null),
-    [apiKey]
-  );
 
   const currentDisplayEvent = viewingEvent ?? state.currentEvent;
 
@@ -303,14 +273,13 @@ export default function Game() {
   const generateNextEvent = useCallback(async () => {
     if (state.isLoading) return;
     if (state.phase === "ceremony" || state.phase === "results") return;
-    if (!claudeClient) return;
 
     setState((s) => ({ ...s, isLoading: true }));
     setViewingEvent(null);
     setApiError("");
 
     try {
-      const data = await generateEvent(claudeClient, {
+      const data = await generateEvent({
         day: state.day,
         timeOfDay: state.timeOfDay,
         characters: state.characters,
@@ -399,16 +368,15 @@ export default function Game() {
       setApiError(`イベント生成に失敗しました: ${msg}`);
       setState((s) => ({ ...s, isLoading: false }));
     }
-  }, [state, claudeClient]);
+  }, [state]);
 
   // ── Generate ceremony ────────────────────────────────────────────────────
   const generateCeremonyHandler = useCallback(async () => {
-    if (!claudeClient) return;
     setState((s) => ({ ...s, isLoading: true }));
     setApiError("");
 
     try {
-      const data = await generateCeremony(claudeClient, {
+      const data = await generateCeremony({
         characters: state.characters,
         affinities: state.affinities,
         paradisePairs: state.paradisePairs,
@@ -446,7 +414,7 @@ export default function Game() {
       setApiError(`セレモニー生成に失敗しました: ${msg}`);
       setState((s) => ({ ...s, isLoading: false }));
     }
-  }, [state, claudeClient]);
+  }, [state]);
 
   // ── Auto-play ─────────────────────────────────────────────────────────────
   const toggleAutoPlay = useCallback(() => {
@@ -481,10 +449,6 @@ export default function Game() {
   }, []);
 
   // ── Render phases ─────────────────────────────────────────────────────────
-  if (!apiKey) {
-    return <ApiKeyModal onSubmit={handleApiKeySubmit} />;
-  }
-
   if (state.phase === "intro") {
     return <IntroScreen onStart={startGame} />;
   }
@@ -565,14 +529,6 @@ export default function Game() {
               ↺ リスタート
             </button>
 
-            {/* Change API Key */}
-            <button
-              onClick={handleClearApiKey}
-              className="text-xs text-gray-600 hover:text-gray-400 transition-colors px-2"
-              title="APIキーを変更"
-            >
-              🔑
-            </button>
           </div>
         </div>
       </header>
